@@ -1,7 +1,6 @@
 package com.senac.api_epi.repositories;
 
 import com.senac.api_epi.entities.Epi;
-import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.*;
 import org.springframework.data.repository.query.Param;
 import java.time.LocalDate;
@@ -11,7 +10,8 @@ public interface EpiRepository extends JpaRepository<Epi, Long> {
     long countByValidadeCaBefore(LocalDate data);
     long countByQuantidadeDisponivelLessThanEqual(int limite);
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select e from Epi e where e.id = :id")
+    // Use MariaDB's locking syntax directly; Hibernate may append the unsupported
+    // "of alias" clause when translating PESSIMISTIC_WRITE.
+    @Query(value = "select * from epi where id = :id for update", nativeQuery = true)
     Optional<Epi> buscarParaMovimentacao(@Param("id") Long id);
 }

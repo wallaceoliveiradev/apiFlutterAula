@@ -1,7 +1,6 @@
 package com.senac.api_epi.repositories;
 
 import com.senac.api_epi.entities.Emprestimo;
-import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.*;
 import org.springframework.data.repository.query.Param;
 import java.util.List;
@@ -13,7 +12,8 @@ public interface EmprestimoRepository extends JpaRepository<Emprestimo, Long> {
     long countByStatus(String status);
     List<Emprestimo> findAllByOrderByIdDesc();
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select e from Emprestimo e where e.id = :id")
+    // MariaDB does not accept Hibernate's generated "for update of alias".
+    // Keep the row lock with MariaDB-compatible SQL for approval/return flows.
+    @Query(value = "select * from emprestimo where id = :id for update", nativeQuery = true)
     Optional<Emprestimo> buscarParaMovimentacao(@Param("id") Long id);
 }

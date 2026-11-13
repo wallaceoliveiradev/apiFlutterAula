@@ -71,6 +71,7 @@ src/
               TreinamentoRealizadoRepository.java
               TreinamentoRepository.java
             service/
+              DashboardService.java
               EmprestimoService.java
               TreinamentoService.java
             ApiEpiApplication.java
@@ -96,6 +97,10 @@ src/
         senac/
           api_epi/
             ApiEpiApplicationTests.java
+            DashboardServiceTest.java
+            EmprestimoServiceTest.java
+            FuncionarioControllerTest.java
+            TreinamentoServiceTest.java
 .gitattributes
 .gitignore
 mvnw
@@ -180,69 +185,27 @@ public class AuthController {
 <file path="src/main/java/com/senac/api_epi/controllers/DashboardController.java">
 package com.senac.api_epi.controllers;
 
-import jakarta.persistence.EntityManager;
+import com.senac.api_epi.service.DashboardService;
 import org.springframework.http.HttpStatus;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.server.ResponseStatusException;
-
-import java.time.LocalDate;
-import java.util.List;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/dashboard")
-@Transactional(readOnly = true)
 public class DashboardController {
-    private final EntityManager em;
+    private final DashboardService service;
 
-    public DashboardController(EntityManager em) {
-        this.em = em;
+    public DashboardController(DashboardService service) {
+        this.service = service;
     }
-
-    private void verificarAdmin(Long adminId) {
-        Long total = em.createQuery("select count(f) from Funcionario f where f.id = :id and upper(trim(f.perfil)) = 'ADMIN'", Long.class)
-                .setParameter("id", adminId).getSingleResult();
-        if (total == 0) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Apenas administradores podem consultar o painel");
-        }
-    }
-
-    private static final String PENDENCIAS = " from Funcionario f, Treinamento t where upper(trim(f.perfil)) <> 'ADMIN' and not exists (select r.id from TreinamentoRealizado r where r.funcionario = f and r.treinamento = t)";
 
     @GetMapping
-    public Map<String, Long> indicadores(@RequestParam Long adminId) {
-        verificarAdmin(adminId);
-        return Map.of(
-                "caVencidos", em.createQuery("select count(e) from Epi e where e.validadeCa < :hoje", Long.class).setParameter("hoje", LocalDate.now()).getSingleResult(),
-                "pedidosPendentes", contarStatus("SOLICITADO"),
-                "episEmprestados", contarStatus("EMPRESTADO"),
-                "treinamentosPendentes", em.createQuery("select count(t)" + PENDENCIAS, Long.class).getSingleResult());
-    }
-
-    private Long contarStatus(String status) {
-        return em.createQuery("select count(e) from Emprestimo e where e.status = :status", Long.class)
-                .setParameter("status", status).getSingleResult();
-    }
-
-    @GetMapping("/{indicador}")
-    public List<Map<String, Object>> detalhes(@PathVariable String indicador, @RequestParam Long adminId) {
-        verificarAdmin(adminId);
-        return switch (indicador) {
-            case "caVencidos" -> em.createQuery("select e.nome, e.ca, e.validadeCa from Epi e where e.validadeCa < :hoje order by e.validadeCa", Object[].class)
-                    .setParameter("hoje", LocalDate.now()).getResultList().stream()
-                    .map(r -> linha(r[0], "CA " + r[1] + " • Validade: " + r[2])).toList();
-            case "pedidosPendentes", "episEmprestados" -> em.createQuery("select e.epi.nome, e.funcionario.nome, e.dataEmprestimo from Emprestimo e where e.status = :status order by e.id desc", Object[].class)
-                    .setParameter("status", indicador.equals("pedidosPendentes") ? "SOLICITADO" : "EMPRESTADO")
-                    .getResultList().stream().map(r -> linha(r[0], r[1] + " • Solicitação: " + r[2])).toList();
-            case "treinamentosPendentes" -> em.createQuery("select t.titulo, f.nome" + PENDENCIAS + " order by f.nome, t.titulo", Object[].class)
-                    .getResultList().stream().map(r -> linha(r[0], r[1])).toList();
-            default -> throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Indicador não encontrado");
-        };
-    }
-
-    private Map<String, Object> linha(Object titulo, Object descricao) {
-        return Map.of("titulo", titulo, "descricao", descricao);
+    public ResponseEntity<?> indicadores(@RequestParam Long adminId) {
+        try {
+            return ResponseEntity.ok(service.indicadores(adminId));
+        } catch (SecurityException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+        }
     }
 }
 </file>
@@ -254,39 +217,45 @@ import com.senac.api_epi.entities.Emprestimo;
 import com.senac.api_epi.service.EmprestimoService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation .*;
-
+import org.springframework.web.bind.annotation.*;
 import java.util.List;
+import java.util.function.Supplier;
 
 @RestController
 @RequestMapping("/emprestimos")
 public class EmprestimoController {
-
     private final EmprestimoService service;
+    public EmprestimoController(EmprestimoService service) { this.service = service; }
 
-    public EmprestimoController(EmprestimoService service) {
-        this.service = service;
-    }
-
-    // POST /emprestimos -> funcionario solicita um EPI
     @PostMapping
     public ResponseEntity<?> solicitar(@RequestBody Emprestimo pedido) {
-        try {
-            Emprestimo emprestimo = service.solicitar(pedido);
-            return ResponseEntity
-                    .status(HttpStatus.CREATED) // 201
-                    .body(emprestimo);
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity
-                    .badRequest()  // 400
-                    .body(e.getMessage());
-        }
+        return responder(() -> service.solicitar(pedido), HttpStatus.CREATED);
     }
 
-    // GET /emprestimos/funcionario/2 -> empréstimos de um funcionário
     @GetMapping("/funcionario/{id}")
     public List<Emprestimo> listarPorFuncionario(@PathVariable Long id) {
         return service.listarPorFuncionario(id);
+    }
+
+    @GetMapping
+    public ResponseEntity<?> listar(@RequestParam Long adminId) {
+        return responder(() -> service.listar(adminId), HttpStatus.OK);
+    }
+
+    @PutMapping("/{id}/aprovar")
+    public ResponseEntity<?> aprovar(@PathVariable Long id, @RequestParam Long adminId) {
+        return responder(() -> service.aprovar(id, adminId), HttpStatus.OK);
+    }
+
+    @PutMapping("/{id}/devolver")
+    public ResponseEntity<?> devolver(@PathVariable Long id, @RequestParam Long adminId) {
+        return responder(() -> service.devolver(id, adminId), HttpStatus.OK);
+    }
+
+    private ResponseEntity<?> responder(Supplier<?> operacao, HttpStatus sucesso) {
+        try { return ResponseEntity.status(sucesso).body(operacao.get()); }
+        catch (SecurityException e) { return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage()); }
+        catch (IllegalArgumentException e) { return ResponseEntity.badRequest().body(e.getMessage()); }
     }
 }
 </file>
@@ -315,19 +284,29 @@ public class EpiController {
 
 <file path="src/main/java/com/senac/api_epi/controllers/FuncionarioController.java">
 package com.senac.api_epi.controllers;
+
 import com.senac.api_epi.entities.Funcionario;
 import com.senac.api_epi.repositories.FuncionarioRepository;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 import java.util.List;
+
 @RestController
 public class FuncionarioController {
     private final FuncionarioRepository repository;
+
     public FuncionarioController(FuncionarioRepository repository) {
         this.repository = repository;
     }
+
     @GetMapping("/funcionarios")
-    public List<Funcionario> listar() {
+    public List<Funcionario> listar(@RequestParam Long adminId) {
+        Funcionario usuario = repository.findById(adminId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "Acesso restrito"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Apenas administradores podem listar funcionários");
+        }
         return repository.findAll();
     }
 }
@@ -535,6 +514,9 @@ public class Treinamento {
 // /arquivos/nr06.pdf
     @Column(length = 200)
     private String arquivoUrl;
+
+    // Null significa treinamento sem prazo de validade.
+    private Integer validadeMeses;
 }
 </file>
 
@@ -576,29 +558,43 @@ public class TreinamentoRealizado {
 
 <file path="src/main/java/com/senac/api_epi/repositories/EmprestimoRepository.java">
 package com.senac.api_epi.repositories;
+
 import com.senac.api_epi.entities.Emprestimo;
-import org.springframework.data.jpa.repository.JpaRepository;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
 import java.util.List;
+import java.util.Optional;
 
 public interface EmprestimoRepository extends JpaRepository<Emprestimo, Long> {
-    // Empréstimos de um funcionário, do mais recente para o mais antigo
     List<Emprestimo> findByFuncionarioIdOrderByIdDesc(Long funcionarioId);
-// O funcionário já está com este EPI e ainda não devolveu?
-boolean existsByFuncionarioIdAndEpiIdAndStatus(
-        Long funcionarioId,
-        Long epiId,
-        String status
-);
+    boolean existsByFuncionarioIdAndEpiIdAndStatus(Long funcionarioId, Long epiId, String status);
+    long countByStatus(String status);
+    List<Emprestimo> findAllByOrderByIdDesc();
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select e from Emprestimo e where e.id = :id")
+    Optional<Emprestimo> buscarParaMovimentacao(@Param("id") Long id);
 }
 </file>
 
 <file path="src/main/java/com/senac/api_epi/repositories/EpiRepository.java">
 package com.senac.api_epi.repositories;
-import com.senac.api_epi.entities.Epi;
-import org.springframework.data.jpa.repository.JpaRepository;
 
+import com.senac.api_epi.entities.Epi;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
+import java.time.LocalDate;
+import java.util.Optional;
 
 public interface EpiRepository extends JpaRepository<Epi, Long> {
+    long countByValidadeCaBefore(LocalDate data);
+    long countByQuantidadeDisponivelLessThanEqual(int limite);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select e from Epi e where e.id = :id")
+    Optional<Epi> buscarParaMovimentacao(@Param("id") Long id);
 }
 </file>
 
@@ -616,6 +612,9 @@ public interface FuncionarioRepository extends JpaRepository<Funcionario, Long> 
             String matricula,
             String senha);
 
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query("select f from Funcionario f where f.id = :id")
+    Optional<Funcionario> buscarParaConclusao(@org.springframework.data.repository.query.Param("id") Long id);
 }
 </file>
 
@@ -639,6 +638,7 @@ public interface TreinamentoRealizadoRepository
             Long funcionarioId,
             Long treinamentoId);
 
+    java.util.Optional<TreinamentoRealizado> findFirstByFuncionarioIdAndTreinamentoIdOrderByDataConclusaoDescIdDesc(Long funcionarioId, Long treinamentoId);
 }
 </file>
 
@@ -657,87 +657,170 @@ public interface TreinamentoRepository extends JpaRepository<Treinamento, Long> 
 }
 </file>
 
+<file path="src/main/java/com/senac/api_epi/service/DashboardService.java">
+package com.senac.api_epi.service;
+
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.repositories.*;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import java.time.LocalDate;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@Service
+@Transactional(readOnly = true)
+public class DashboardService {
+    private final EpiRepository epiRepository;
+    private final EmprestimoRepository emprestimoRepository;
+    private final FuncionarioRepository funcionarioRepository;
+    private final TreinamentoRepository treinamentoRepository;
+    private final TreinamentoRealizadoRepository realizadoRepository;
+
+    public DashboardService(EpiRepository epiRepository, EmprestimoRepository emprestimoRepository,
+                            FuncionarioRepository funcionarioRepository, TreinamentoRepository treinamentoRepository,
+                            TreinamentoRealizadoRepository realizadoRepository) {
+        this.epiRepository = epiRepository;
+        this.emprestimoRepository = emprestimoRepository;
+        this.funcionarioRepository = funcionarioRepository;
+        this.treinamentoRepository = treinamentoRepository;
+        this.realizadoRepository = realizadoRepository;
+    }
+
+    public Map<String, Long> indicadores(Long adminId) {
+        verificarAdmin(adminId);
+        long funcionarios = funcionarioRepository.count();
+        long treinamentos = treinamentoRepository.count();
+        long realizados = realizadoRepository.count();
+        // Fórmula da Aula 7. O piso zero acomoda históricos de renovação do projeto existente.
+        long pendentes = Math.max(0L, funcionarios * treinamentos - realizados);
+        Map<String, Long> dados = new LinkedHashMap<>();
+        dados.put("episCadastrados", epiRepository.count());
+        dados.put("episEmprestados", emprestimoRepository.countByStatus("EMPRESTADO"));
+        dados.put("episDevolvidos", emprestimoRepository.countByStatus("DEVOLVIDO"));
+        dados.put("caVencidos", epiRepository.countByValidadeCaBefore(LocalDate.now()));
+        dados.put("solicitacoesPendentes", emprestimoRepository.countByStatus("SOLICITADO"));
+        dados.put("treinamentosPendentes", pendentes);
+        // Exercícios 1 e 2 da página 18.
+        dados.put("funcionariosCadastrados", funcionarios);
+        dados.put("estoqueBaixo", epiRepository.countByQuantidadeDisponivelLessThanEqual(2));
+        return dados;
+    }
+
+    private void verificarAdmin(Long adminId) {
+        Funcionario usuario = funcionarioRepository.findById(adminId)
+                .orElseThrow(() -> new SecurityException("Usuário não encontrado"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new SecurityException("Apenas administradores podem ver o painel");
+        }
+    }
+}
+</file>
+
 <file path="src/main/java/com/senac/api_epi/service/EmprestimoService.java">
 package com.senac.api_epi.service;
 
-import com.senac.api_epi.entities.Emprestimo;
-import com.senac.api_epi.entities.Epi;
-import com.senac.api_epi.entities.Funcionario;
-import com.senac.api_epi.repositories.EmprestimoRepository;
-import com.senac.api_epi.repositories.EpiRepository;
-import com.senac.api_epi.repositories.FuncionarioRepository;
-import org. springframework. stereotype. Service;
-
+import com.senac.api_epi.entities.*;
+import com.senac.api_epi.repositories.*;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.util.List;
 
 @Service
 public class EmprestimoService {
-
     private final EmprestimoRepository emprestimoRepository;
     private final FuncionarioRepository funcionarioRepository;
     private final EpiRepository epiRepository;
 
     public EmprestimoService(EmprestimoRepository emprestimoRepository,
-                             FuncionarioRepository funcionarioRepository,
-                             EpiRepository epiRepository) {
+                             FuncionarioRepository funcionarioRepository, EpiRepository epiRepository) {
         this.emprestimoRepository = emprestimoRepository;
         this.funcionarioRepository = funcionarioRepository;
         this.epiRepository = epiRepository;
     }
 
     public Emprestimo solicitar(Emprestimo pedido) {
-// 1. 0 app enviou o funcionario e o EPI com id?
-        if (pedido.getFuncionario() == null
-                || pedido. getFuncionario().getId() == null
-                || pedido.getEpi() == null
-                || pedido.getEpi().getId() == null) {
+        if (pedido.getFuncionario() == null || pedido.getFuncionario().getId() == null ||
+                pedido.getEpi() == null || pedido.getEpi().getId() == null) {
             throw new IllegalArgumentException("Informe o funcionário e o EPI");
         }
-// 2. 0 pedido chega só com os ids: busca os dados completos no banco
-            Funcionario funcionario = funcionarioRepository
-                    .findById(pedido.getFuncionario() . getId())
-                    .orElseThrow( () ->
-                            new IllegalArgumentException("Funcionario não encontrado"));
-            Epi epi = epiRepository
-                    .findById(pedido.getEpi().getId())
-                    .orElseThrow( () ->
-                            new IllegalArgumentException("EPI não encontrado"));
-// 3. Regras de negocio (NR-06)
-            if (epi.isCaVencido()) {
-                throw new IllegalArgumentException(
-                        "EPI com CA vencido nao pode ser emprestado");
-            }
+        Funcionario funcionario = funcionarioRepository.findById(pedido.getFuncionario().getId())
+                .orElseThrow(() -> new IllegalArgumentException("Funcionário não encontrado"));
+        Epi epi = epiRepository.findById(pedido.getEpi().getId())
+                .orElseThrow(() -> new IllegalArgumentException("EPI não encontrado"));
+        validarDisponibilidade(epi);
+        if (emprestimoRepository.existsByFuncionarioIdAndEpiIdAndStatus(funcionario.getId(), epi.getId(), "SOLICITADO")) {
+            throw new IllegalArgumentException("Você já tem uma solicitação aberta para este EPI");
+        }
+        pedido.setId(null);
+        pedido.setFuncionario(funcionario);
+        pedido.setEpi(epi);
+        pedido.setDataEmprestimo(LocalDate.now());
+        pedido.setDataDevolucao(null);
+        pedido.setStatus("SOLICITADO");
+        return emprestimoRepository.save(pedido);
+    }
 
-                if (epi.getQuantidadeDisponivel() <= 0) {
-                    throw new IllegalArgumentException("EPI sem estoque disponivel");
-                }
+    public List<Emprestimo> listarPorFuncionario(Long funcionarioId) {
+        return emprestimoRepository.findByFuncionarioIdOrderByIdDesc(funcionarioId);
+    }
 
-                    boolean jaSolicitou = emprestimoRepository
-                            .existsByFuncionarioIdAndEpiIdAndStatus(
-                                    funcionario.getId(), epi.getId(), "SOLICITADO");
+    public List<Emprestimo> listar(Long adminId) {
+        verificarAdmin(adminId);
+        return emprestimoRepository.findAllByOrderByIdDesc();
+    }
 
-                    if (jaSolicitou) {
-                        throw new IllegalArgumentException(
-                                "Vocé já tem uma solicitação aberta para este EPI");
-                    }
+    @Transactional
+    public Emprestimo aprovar(Long id, Long adminId) {
+        verificarAdmin(adminId);
+        Emprestimo pedido = buscarBloqueado(id);
+        if (!"SOLICITADO".equals(pedido.getStatus())) {
+            throw new IllegalArgumentException("Somente solicitações pendentes podem ser aprovadas");
+        }
+        Epi epi = epiRepository.buscarParaMovimentacao(pedido.getEpi().getId())
+                .orElseThrow(() -> new IllegalArgumentException("EPI não encontrado"));
+        validarDisponibilidade(epi);
+        epi.setQuantidadeDisponivel(epi.getQuantidadeDisponivel() - 1);
+        epiRepository.save(epi);
+        pedido.setStatus("EMPRESTADO");
+        return emprestimoRepository.save(pedido);
+    }
 
-// 4. A API decide estes campos (nao confiamos no que veio do app)
-                        pedido.setId(null); // sempre um registro novo
-                        pedido.setFuncionario(funcionario); // troca o "so id" pelo objeto completo
-                        pedido.setEpi(epi);
-                        pedido.setDataEmprestimo(LocalDate.now());
-                        pedido.setDataDevolucao(null);
-                        pedido.setStatus("SOLICITADO");
+    @Transactional
+    public Emprestimo devolver(Long id, Long adminId) {
+        verificarAdmin(adminId);
+        Emprestimo pedido = buscarBloqueado(id);
+        if (!"EMPRESTADO".equals(pedido.getStatus())) {
+            throw new IllegalArgumentException("Somente EPIs emprestados podem ser devolvidos");
+        }
+        Epi epi = epiRepository.buscarParaMovimentacao(pedido.getEpi().getId())
+                .orElseThrow(() -> new IllegalArgumentException("EPI não encontrado"));
+        epi.setQuantidadeDisponivel(epi.getQuantidadeDisponivel() + 1);
+        epiRepository.save(epi);
+        pedido.setStatus("DEVOLVIDO");
+        pedido.setDataDevolucao(LocalDate.now());
+        return emprestimoRepository.save(pedido);
+    }
 
-// 5. Grava na tabela emprestimo
-                        return emprestimoRepository.save(pedido);
-                    }
+    private Emprestimo buscarBloqueado(Long id) {
+        return emprestimoRepository.buscarParaMovimentacao(id)
+                .orElseThrow(() -> new IllegalArgumentException("Empréstimo não encontrado"));
+    }
 
-                        public List<Emprestimo> listarPorFuncionario (Long funcionarioId){
-                            return emprestimoRepository.findByFuncionarioIdOrderByIdDesc(funcionarioId);
-                        }
-                    }
+    private void validarDisponibilidade(Epi epi) {
+        if (epi.isCaVencido()) throw new IllegalArgumentException("EPI com CA vencido não pode ser emprestado");
+        if (epi.getQuantidadeDisponivel() <= 0) throw new IllegalArgumentException("EPI sem estoque disponível");
+    }
+
+    private void verificarAdmin(Long adminId) {
+        Funcionario usuario = funcionarioRepository.findById(adminId)
+                .orElseThrow(() -> new SecurityException("Usuário não encontrado"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new SecurityException("Apenas administradores podem gerenciar empréstimos");
+        }
+    }
+}
 </file>
 
 <file path="src/main/java/com/senac/api_epi/service/TreinamentoService.java">
@@ -749,91 +832,78 @@ import com.senac.api_epi.entities.TreinamentoRealizado;
 import com.senac.api_epi.repositories.FuncionarioRepository;
 import com.senac.api_epi.repositories.TreinamentoRealizadoRepository;
 import com.senac.api_epi.repositories.TreinamentoRepository;
-import org.springframework. stereotype.Service;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.util.List;
 
 @Service
 public class TreinamentoService {
-
     private final TreinamentoRepository treinamentoRepository;
     private final TreinamentoRealizadoRepository realizadoRepository;
     private final FuncionarioRepository funcionarioRepository;
 
     public TreinamentoService(TreinamentoRepository treinamentoRepository,
-                              TreinamentoRealizadoRepository realizadoRepository,
-                              FuncionarioRepository funcionarioRepository) {
+                             TreinamentoRealizadoRepository realizadoRepository,
+                             FuncionarioRepository funcionarioRepository) {
         this.treinamentoRepository = treinamentoRepository;
         this.realizadoRepository = realizadoRepository;
-        this. funcionarioRepository = funcionarioRepository;
-
+        this.funcionarioRepository = funcionarioRepository;
     }
 
     public List<Treinamento> listar() {
         return treinamentoRepository.findAllByOrderByTituloAsc();
-}
-
-// So o administrador cadastra treinamentos
-public Treinamento cadastrar(Treinamento treinamento, Long adminId) {
-    verificarAdmin(adminId);
-
-    if (treinamento.getTitulo() == null
-            || treinamento.getTitulo().isBlank()) {
-        throw new IllegalArgumentException("Informe o titulo do treinamento");
     }
-        treinamento.setId(null); // sempre um registro novo
+
+    public Treinamento cadastrar(Treinamento treinamento, Long adminId) {
+        verificarAdmin(adminId);
+        if (treinamento.getTitulo() == null || treinamento.getTitulo().isBlank()) {
+            throw new IllegalArgumentException("Informe o título do treinamento");
+        }
+        if (treinamento.getValidadeMeses() != null && treinamento.getValidadeMeses() <= 0) {
+            throw new IllegalArgumentException("A validade deve ser maior que zero");
+        }
+        treinamento.setId(null);
         return treinamentoRepository.save(treinamento);
     }
-// Registra que o funcionario concluiu o treinamento
 
+    @Transactional
     public TreinamentoRealizado concluir(Long treinamentoId, Long funcionarioId) {
-        Funcionario funcionario = funcionarioRepository
-                .findById(funcionarioId)
-                .orElseThrow(() ->
-                        new IllegalArgumentException("Funcionário não encontrado"));
+        // Serializa conclusões do mesmo funcionário para evitar renovações duplicadas.
+        Funcionario funcionario = funcionarioRepository.buscarParaConclusao(funcionarioId)
+                .orElseThrow(() -> new IllegalArgumentException("Funcionário não encontrado"));
+        Treinamento treinamento = treinamentoRepository.findById(treinamentoId)
+                .orElseThrow(() -> new IllegalArgumentException("Treinamento não encontrado"));
 
-        Treinamento treinamento = treinamentoRepository
-                .findById(treinamentoId)
-                .orElseThrow(() ->
-                        new IllegalArgumentException("Treinamento não encontrado"));
-
-        boolean jaConcluiu = realizadoRepository
-                .existsByFuncionarioIdAndTreinamentoId(
-                        funcionario.getId(), treinamento.getId());
-
-        if (jaConcluiu) {
-            throw new IllegalArgumentException(
-                    "Este treinamento já foi concluído");
-
-        }
+        realizadoRepository.findFirstByFuncionarioIdAndTreinamentoIdOrderByDataConclusaoDescIdDesc(funcionarioId, treinamentoId)
+                .ifPresent(ultimo -> {
+                    Integer meses = treinamento.getValidadeMeses();
+                    if (meses == null || !ultimo.getDataConclusao().plusMonths(meses).isBefore(LocalDate.now())) {
+                        throw new IllegalArgumentException("Este treinamento já possui uma conclusão válida");
+                    }
+                });
 
         TreinamentoRealizado registro = new TreinamentoRealizado();
         registro.setFuncionario(funcionario);
         registro.setTreinamento(treinamento);
         registro.setDataConclusao(LocalDate.now());
-
+        // Cada renovação cria um novo registro e preserva o histórico.
         return realizadoRepository.save(registro);
     }
-        public List<TreinamentoRealizado> listarRealizados(Long funcionarioId){
-            return realizadoRepository
-                    .findByFuncionarioIdOrderByDataConclusaoDesc(funcionarioId);
-        }
 
-    // Mesmo controle de acesso da Aula 5
+    public List<TreinamentoRealizado> listarRealizados(Long funcionarioId) {
+        return realizadoRepository.findByFuncionarioIdOrderByDataConclusaoDesc(funcionarioId);
+    }
+
     private void verificarAdmin(Long adminId) {
-        Funcionario usuario = funcionarioRepository
-                .findById(adminId)
-                .orElseThrow(() ->
-                        new SecurityException("Usuário não encontrado"));
-
-        if (!"ADMIN".equals(usuario.getPerfil())) {
-            throw new SecurityException(
-                    "Apenas administradores podem fazer esta operação");
-
+        Funcionario usuario = funcionarioRepository.findById(adminId)
+                .orElseThrow(() -> new SecurityException("Usuário não encontrado"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new SecurityException("Apenas administradores podem fazer esta operação");
         }
     }
-    }
+}
 </file>
 
 <file path="src/main/java/com/senac/api_epi/ApiEpiApplication.java">
@@ -879,6 +949,270 @@ class ApiEpiApplicationTests {
 	void contextLoads() {
 	}
 
+}
+</file>
+
+<file path="src/test/java/com/senac/api_epi/DashboardServiceTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.repositories.*;
+import com.senac.api_epi.service.DashboardService;
+import com.senac.api_epi.controllers.DashboardController;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import java.time.LocalDate;
+import java.util.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class DashboardServiceTest {
+    private final EpiRepository epis = mock(EpiRepository.class);
+    private final EmprestimoRepository emprestimos = mock(EmprestimoRepository.class);
+    private final FuncionarioRepository funcionarios = mock(FuncionarioRepository.class);
+    private final TreinamentoRepository treinamentos = mock(TreinamentoRepository.class);
+    private final TreinamentoRealizadoRepository realizados = mock(TreinamentoRealizadoRepository.class);
+    private final DashboardService service = new DashboardService(epis, emprestimos, funcionarios, treinamentos, realizados);
+
+    @BeforeEach
+    void preparar() {
+        Funcionario admin = new Funcionario();
+        admin.setPerfil("ADMIN");
+        when(funcionarios.findById(1L)).thenReturn(Optional.of(admin));
+    }
+
+    @Test
+    void contratoEFormulaDaAulaSeteComExercicios() {
+        when(funcionarios.count()).thenReturn(3L);
+        when(treinamentos.count()).thenReturn(4L);
+        when(realizados.count()).thenReturn(2L);
+        when(epis.count()).thenReturn(8L);
+        when(emprestimos.countByStatus("EMPRESTADO")).thenReturn(2L);
+        when(emprestimos.countByStatus("DEVOLVIDO")).thenReturn(1L);
+        when(emprestimos.countByStatus("SOLICITADO")).thenReturn(1L);
+        when(epis.countByValidadeCaBefore(LocalDate.now())).thenReturn(1L);
+        when(epis.countByQuantidadeDisponivelLessThanEqual(2)).thenReturn(2L);
+        Map<String, Long> dados = service.indicadores(1L);
+        assertInstanceOf(LinkedHashMap.class, dados);
+        assertEquals(List.of("episCadastrados", "episEmprestados", "episDevolvidos", "caVencidos", "solicitacoesPendentes", "treinamentosPendentes", "funcionariosCadastrados", "estoqueBaixo"), new ArrayList<>(dados.keySet()));
+        assertEquals(10L, dados.get("treinamentosPendentes"));
+        assertEquals(8L, dados.get("episCadastrados"));
+        assertEquals(2L, dados.get("estoqueBaixo"));
+        verify(epis, never()).findAll();
+        verify(emprestimos, never()).findAll();
+    }
+
+    @Test
+    void funcionarioRecebe403SemExecutarContagens() {
+        Funcionario funcionario = new Funcionario();
+        funcionario.setPerfil("FUNCIONARIO");
+        when(funcionarios.findById(2L)).thenReturn(Optional.of(funcionario));
+        assertEquals(403, new DashboardController(service).indicadores(2L).getStatusCode().value());
+        verifyNoInteractions(epis, emprestimos, treinamentos, realizados);
+    }
+
+    @Test
+    void historicoDeRenovacaoNaoProduzIndicadorNegativo() {
+        when(funcionarios.count()).thenReturn(1L);
+        when(treinamentos.count()).thenReturn(1L);
+        when(realizados.count()).thenReturn(3L);
+        assertEquals(0L, service.indicadores(1L).get("treinamentosPendentes"));
+    }
+}
+</file>
+
+<file path="src/test/java/com/senac/api_epi/EmprestimoServiceTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.entities.*;
+import com.senac.api_epi.repositories.*;
+import com.senac.api_epi.service.EmprestimoService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import java.time.LocalDate;
+import java.util.Optional;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class EmprestimoServiceTest {
+    private final EpiRepository epis = mock(EpiRepository.class);
+    private final EmprestimoRepository emprestimos = mock(EmprestimoRepository.class);
+    private final FuncionarioRepository funcionarios = mock(FuncionarioRepository.class);
+    private final EmprestimoService service = new EmprestimoService(emprestimos, funcionarios, epis);
+    private Epi epi;
+    private Emprestimo pedido;
+
+    @BeforeEach
+    void preparar() {
+        Funcionario admin = new Funcionario();
+        admin.setPerfil("ADMIN");
+        when(funcionarios.findById(1L)).thenReturn(Optional.of(admin));
+        epi = new Epi();
+        epi.setId(1L);
+        epi.setValidadeCa(LocalDate.now().plusYears(1));
+        epi.setQuantidadeDisponivel(2);
+        pedido = new Emprestimo();
+        pedido.setId(9L);
+        pedido.setEpi(epi);
+        pedido.setStatus("SOLICITADO");
+        when(emprestimos.buscarParaMovimentacao(9L)).thenReturn(Optional.of(pedido));
+        when(epis.buscarParaMovimentacao(1L)).thenReturn(Optional.of(epi));
+        when(emprestimos.save(any())).thenAnswer(i -> i.getArgument(0));
+    }
+
+    @Test
+    void aprovarEDepoisDevolverAtualizaStatusEEstoque() {
+        service.aprovar(9L, 1L);
+        assertEquals("EMPRESTADO", pedido.getStatus());
+        assertEquals(1, epi.getQuantidadeDisponivel());
+        service.devolver(9L, 1L);
+        assertEquals("DEVOLVIDO", pedido.getStatus());
+        assertEquals(2, epi.getQuantidadeDisponivel());
+        assertEquals(LocalDate.now(), pedido.getDataDevolucao());
+    }
+
+    @Test
+    void naoAprovaDuasVezes() {
+        service.aprovar(9L, 1L);
+        assertThrows(IllegalArgumentException.class, () -> service.aprovar(9L, 1L));
+        assertEquals(1, epi.getQuantidadeDisponivel());
+    }
+
+    @Test
+    void naoDevolveDuasVezes() {
+        pedido.setStatus("EMPRESTADO");
+        service.devolver(9L, 1L);
+        assertThrows(IllegalArgumentException.class, () -> service.devolver(9L, 1L));
+        assertEquals(3, epi.getQuantidadeDisponivel());
+    }
+
+    @Test
+    void naoAprovaCaVencido() {
+        epi.setValidadeCa(LocalDate.now().minusDays(1));
+        assertThrows(IllegalArgumentException.class, () -> service.aprovar(9L, 1L));
+        verify(emprestimos, never()).save(any());
+        assertEquals(2, epi.getQuantidadeDisponivel());
+    }
+
+    @Test
+    void naoAprovaSemEstoque() {
+        epi.setQuantidadeDisponivel(0);
+        assertThrows(IllegalArgumentException.class, () -> service.aprovar(9L, 1L));
+        verify(emprestimos, never()).save(any());
+    }
+
+    @Test
+    void funcionarioNaoPodeAprovarNemDevolver() {
+        Funcionario usuario = new Funcionario();
+        usuario.setPerfil("FUNCIONARIO");
+        when(funcionarios.findById(2L)).thenReturn(Optional.of(usuario));
+        assertThrows(SecurityException.class, () -> service.aprovar(9L, 2L));
+        assertThrows(SecurityException.class, () -> service.devolver(9L, 2L));
+        verifyNoInteractions(epis, emprestimos);
+    }
+}
+</file>
+
+<file path="src/test/java/com/senac/api_epi/FuncionarioControllerTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.controllers.FuncionarioController;
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.repositories.FuncionarioRepository;
+import org.junit.jupiter.api.Test;
+import org.springframework.web.server.ResponseStatusException;
+import java.util.List;
+import java.util.Optional;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class FuncionarioControllerTest {
+    @Test
+    void funcionarioNaoPodeListarOutrosFuncionarios() {
+        FuncionarioRepository repo = mock(FuncionarioRepository.class);
+        Funcionario usuario = new Funcionario();
+        usuario.setPerfil("FUNCIONARIO");
+        when(repo.findById(7L)).thenReturn(Optional.of(usuario));
+        ResponseStatusException erro = assertThrows(ResponseStatusException.class,
+                () -> new FuncionarioController(repo).listar(7L));
+        assertEquals(403, erro.getStatusCode().value());
+        verify(repo, never()).findAll();
+    }
+
+    @Test
+    void administradorPodeListar() {
+        FuncionarioRepository repo = mock(FuncionarioRepository.class);
+        Funcionario usuario = new Funcionario();
+        usuario.setPerfil("ADMIN");
+        when(repo.findById(1L)).thenReturn(Optional.of(usuario));
+        when(repo.findAll()).thenReturn(List.of(usuario));
+        assertEquals(1, new FuncionarioController(repo).listar(1L).size());
+    }
+}
+</file>
+
+<file path="src/test/java/com/senac/api_epi/TreinamentoServiceTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.entities.*;
+import com.senac.api_epi.repositories.*;
+import com.senac.api_epi.service.TreinamentoService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import java.time.LocalDate;
+import java.util.Optional;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class TreinamentoServiceTest {
+    private final TreinamentoRepository treinamentos = mock(TreinamentoRepository.class);
+    private final TreinamentoRealizadoRepository realizados = mock(TreinamentoRealizadoRepository.class);
+    private final FuncionarioRepository funcionarios = mock(FuncionarioRepository.class);
+    private final TreinamentoService service = new TreinamentoService(treinamentos, realizados, funcionarios);
+    private Treinamento treinamento;
+
+    @BeforeEach
+    void preparar() {
+        Funcionario funcionario = new Funcionario();
+        funcionario.setId(7L);
+        treinamento = new Treinamento();
+        treinamento.setId(1L);
+        treinamento.setValidadeMeses(12);
+        when(funcionarios.buscarParaConclusao(7L)).thenReturn(Optional.of(funcionario));
+        when(treinamentos.findById(1L)).thenReturn(Optional.of(treinamento));
+        when(realizados.save(any())).thenAnswer(invocacao -> invocacao.getArgument(0));
+    }
+
+    private void conclusaoEm(LocalDate data) {
+        TreinamentoRealizado anterior = new TreinamentoRealizado();
+        anterior.setDataConclusao(data);
+        when(realizados.findFirstByFuncionarioIdAndTreinamentoIdOrderByDataConclusaoDescIdDesc(7L, 1L))
+                .thenReturn(Optional.of(anterior));
+    }
+
+    @Test
+    void renovacaoVencidaCriaOutroRegistroSemApagarHistorico() {
+        conclusaoEm(LocalDate.now().minusYears(2));
+        TreinamentoRealizado novo = service.concluir(1L, 7L);
+        assertNull(novo.getId());
+        assertEquals(LocalDate.now(), novo.getDataConclusao());
+        verify(realizados).save(novo);
+        verify(realizados, never()).delete(any());
+    }
+
+    @Test
+    void conclusaoQueVenceHojeContinuaValida() {
+        conclusaoEm(LocalDate.now().minusMonths(12));
+        assertThrows(IllegalArgumentException.class, () -> service.concluir(1L, 7L));
+        verify(realizados, never()).save(any());
+    }
+
+    @Test
+    void semValidadeNaoPermiteConclusaoDuplicada() {
+        treinamento.setValidadeMeses(null);
+        conclusaoEm(LocalDate.now().minusYears(5));
+        assertThrows(IllegalArgumentException.class, () -> service.concluir(1L, 7L));
+    }
 }
 </file>
 
